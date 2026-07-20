@@ -16,9 +16,12 @@
 1. Read **§2 Definitions dictionary** first — exam vocabulary.
 2. Work through **§3 Core concepts** in order (platform → storage → Spark → pipelines).
 3. For every service: note **advantages** and **limitations** (exam loves trade-offs).
-4. Run the **§7 Hands-on** once end-to-end.
-5. Drill **§5 Misunderstandings** and **§6 Decision cheat-sheets** before the exam.
-6. Use **§8 Quick revision** the day before.
+4. When you see a SQL/Python block, read the **step-by-step purpose** under it (or **Appendix C**).
+5. Study **§3.20 Asset Bundles** with the diagrams — common production/exam topic.
+6. Run the **§7 Hands-on** once end-to-end.
+7. Drill **§5 Misunderstandings** and **§6 Decision cheat-sheets**.
+8. Take the mock exam: `cert_Databricks_DEA_Associate_Mock_Exam_2026-07-20.md`.
+9. Use **§8 Quick revision** the day before.
 
 **Language note:** Databricks renamed some products. Exam/docs may say **Delta Live Tables (DLT)** or **Lakeflow Declarative Pipelines (LDP)** — same family of declarative ETL. Prefer the term your current exam guide uses.
 
@@ -195,7 +198,7 @@ Delta Lake is a storage layer that stores data as **Parquet files** plus a **tra
 - `VACUUM` deletes old files → can break time travel beyond retention
 - Not magic: bad partitioning / clustering still hurts performance
 
-**Mini example**
+**Mini example (explained)**
 
 ```sql
 CREATE TABLE sales USING DELTA AS SELECT * FROM bronze_sales;
@@ -204,6 +207,12 @@ UPDATE sales SET amount = amount * 1.19 WHERE country = 'DE';
 
 SELECT * FROM sales VERSION AS OF 3;
 ```
+
+| Step | Statement | Purpose (what happens) |
+|------|-----------|-------------------------|
+| 1 | `CREATE TABLE sales USING DELTA AS SELECT * FROM bronze_sales` | **CTAS:** create a new Delta table named `sales`, copy all rows from `bronze_sales`, write Parquet files + start `_delta_log` at version 0 |
+| 2 | `UPDATE ... WHERE country = 'DE'` | Change matching rows: multiply `amount` by 1.19 (e.g. add VAT). Delta does **not** edit old files in place — it writes new files and commits version 1 in the log |
+| 3 | `SELECT * FROM sales VERSION AS OF 3` | **Time travel:** read the table as it looked at version 3 (if that version still exists and was not vacuumed) |
 
 ---
 
@@ -311,6 +320,15 @@ FROM silver.orders
 GROUP BY order_date;
 ```
 
+**Purpose of this query (step by step)**
+
+1. Read all rows from `silver.orders` (cleaned orders).
+2. Group rows that share the same `order_date`.
+3. For each date, compute `SUM(amount)` and name it `revenue`.
+4. **Create** a new table `gold.daily_revenue` and **fill it** with those aggregated rows in one shot.
+
+**Why use it:** Materialize a Gold mart so BI tools query a small aggregate instead of rescanning Silver every time.
+
 **Use cases:** Quick materialization of a query result; prototyping Gold tables.  
 **Advantages:** One statement, clear.  
 **Limitations:** Full rebuild pattern unless combined with incremental design; be explicit about `USING DELTA` / location / UC path in production.
@@ -341,6 +359,50 @@ WHEN MATCHED AND s.op = 'D' THEN DELETE
 WHEN NOT MATCHED THEN INSERT *;
 ```
 
+**Purpose of this MERGE (step by step)**
+
+| Step | Clause | Meaning |
+|------|--------|---------|
+| 1 | `MERGE INTO silver.customers t` | Target table to change = `t` (current Silver customers) |
+| 2 | `USING bronze.customers_cdc s` | Source of changes = CDC feed `s` (inserts/updates/deletes from upstream) |
+| 3 | `ON t.customer_id = s.customer_id` | Match key: same customer id → treat as same business entity |
+| 4 | `WHEN MATCHED AND s.op = 'U' THEN UPDATE SET *` | If found **and** operation is Update → overwrite target columns from source |
+| 5 | `WHEN MATCHED AND s.op = 'D' THEN DELETE` | If found **and** operation is Delete → remove that customer from Silver |
+| 6 | `WHEN NOT MATCHED THEN INSERT *` | If customer id is **new** → insert the full source row |
+
+**Mental picture**
+
+```
+bronze.customers_cdc (changes)     silver.customers (truth)
+         │                                  │
+         └────────── MERGE on id ───────────┘
+              U → update row
+              D → delete row
+              new id → insert row
+```
+
+#### INSERT examples (explained)
+
+```sql
+-- Append new events (does NOT remove old rows)
+INSERT INTO bronze.events SELECT * FROM landing_today;
+
+-- Replace entire table contents with a fresh query result
+INSERT OVERWRITE TABLE gold.daily_revenue
+SELECT order_date, SUM(amount) AS revenue
+FROM silver.orders
+GROUP BY order_date;
+
+-- Replace only one partition (classic pattern)
+INSERT OVERWRITE TABLE silver.orders PARTITION (order_date = '2026-07-20')
+SELECT * FROM staging_orders_2026_07_20;
+```
+
+| Query | Purpose |
+|-------|---------|
+| `INSERT INTO` | Add rows; history of appends remains (unless you delete later) |
+| `INSERT OVERWRITE` (table) | Wipe table logical contents and refill from SELECT |
+| `INSERT OVERWRITE` (partition) | Rebuild **only** that date/partition — safer than full wipe |
 ---
 
 ### 3.8 Deep vs shallow clones
@@ -423,6 +485,12 @@ When reading semi-structured files (especially with Auto Loader / `cloudFiles` /
 SELECT transform(scores, x -> x * 1.1) AS bumped FROM t;
 ```
 
+**Purpose (step by step)**
+
+1. Read column `scores` (an **array** of numbers) from table `t`.
+2. For **each element** `x` in that array, compute `x * 1.1`.
+3. Return a new array column `bumped` (same length, values scaled up 10%).
+4. Engine stays in SQL/Catalyst — usually faster than a Python UDF loop.
 **UDFs (user-defined functions):** Custom Python/Scala logic registered as functions.
 
 | | Higher-order / built-ins | Python UDF |
@@ -482,6 +550,18 @@ from pyspark.sql.functions import broadcast
 df_large.join(broadcast(df_small), "id")
 ```
 
+**Purpose (step by step)**
+
+1. Mark `df_small` as a **broadcast** hint: “this side is tiny — ship a copy to every executor.”
+2. Join on column `id` with `df_large`.
+3. Each executor holds the small table in memory and scans its local chunks of the large table.
+4. **Avoids** a full shuffle of the large table for the join (when the hint is valid).
+
+```
+Without broadcast:  both sides shuffle by id  →  heavy network
+With broadcast:     small table copied once   →  large table stays local
+```
+
 **Advantages:** Huge speedup when small side is truly small.  
 **Limitations:** If “small” isn’t small → executor OOM; wrong on huge dims.
 
@@ -493,6 +573,15 @@ df_large.join(broadcast(df_small), "id")
 from pyspark.sql.functions import explode, explode_outer
 df.select(explode("events").alias("event"))
 ```
+
+**Purpose (step by step)**
+
+1. Start with rows that have an **array** column `events` (e.g. `[click, view, buy]`).
+2. `explode("events")` creates **one output row per array element**.
+3. Alias that element as `event`.
+4. Result: nested list → flat rows for joins/aggregations.
+
+Example: 1 input row with 3 events → 3 output rows.
 
 - `explode`: drops rows with null/empty arrays  
 - `explode_outer`: keeps them with nulls  
@@ -615,6 +704,16 @@ Examples:
 @dlt.expect_or_fail("amount_nonneg", "amount >= 0")
 ```
 
+**Purpose of each line (step by step)**
+
+| Decorator | Condition | What happens on failure |
+|-----------|-----------|-------------------------|
+| `@dlt.expect("valid_id", ...)` | `customer_id` must not be null | Row **kept**; violation **counted** in metrics (warn/track) |
+| `@dlt.expect_or_drop("valid_email", ...)` | email must look like it contains `@` | Row **dropped** from the output table |
+| `@dlt.expect_or_fail("amount_nonneg", ...)` | amount must be ≥ 0 | Pipeline update **fails** (stop bad data promoting) |
+
+Think of them as quality gates with three severities: **log**, **drop**, **stop**.
+
 | Mode | Behavior |
 |------|----------|
 | expect (warn/track) | Keep row; metrics show violations |
@@ -626,44 +725,199 @@ Examples:
 
 ---
 
-### 3.20 Declarative Automation Bundles — example
+### 3.20 Declarative Automation Bundles (Databricks Asset Bundles) — deep dive
 
-**Databricks Asset Bundles (DABs)** package jobs, pipelines, notebooks, and configs as code for deploy-to-dev/stage/prod.
+**Definition:**  
+**Databricks Asset Bundles (DABs)** let you describe your Databricks project **as code** (YAML + source files): jobs, pipelines (DLT/LDP), notebooks, clusters settings, permissions — then **deploy the same definition** to `dev` / `staging` / `prod` with one CLI workflow.
 
-**Minimal mental example**
+People also say “declarative automation bundles” because you **declare the desired end state**; Databricks applies it (create/update resources), instead of clicking the Jobs UI by hand in every workspace.
+
+**Analogy:**  
+Like a **shipping container + packing list**. The container holds notebooks and pipeline code. The packing list (`databricks.yml`) says: “in prod, create this job, this pipeline, on this schedule.” You don’t rebuild the warehouse by hand each time — you ship the container.
+
+#### Why bundles exist (problem they solve)
+
+```
+WITHOUT bundles (click-ops):
+  Dev workspace  →  engineer clicks Job A
+  Prod workspace →  another engineer clicks Job A'  (drift!)
+  Git            →  notebooks only, infra forgotten
+
+WITH bundles:
+  Git repo = notebooks + databricks.yml + resources
+       │
+       ├── databricks bundle deploy -t dev
+       └── databricks bundle deploy -t prod
+              same code, different target configs
+```
+
+#### Core ideas (easy)
+
+| Concept | Meaning |
+|---------|---------|
+| **Bundle** | One project package (code + resource definitions) |
+| **`databricks.yml`** | Root config: name, includes, targets, variables |
+| **Resources** | Things to create: `jobs`, `pipelines`, `schemas`, … |
+| **Targets** | Environments (`dev`, `prod`) with different hosts/params |
+| **Variables** | Parameterize catalog names, schedules, cluster sizes |
+| **Deploy** | Push definition → workspace creates/updates resources |
+| **Run** | Trigger a job/pipeline from the CLI after deploy |
+
+#### Folder layout (typical)
+
+```
+retail_lakehouse/
+├── databricks.yml          ← bundle brain
+├── src/
+│   ├── bronze_ingest.py    ← Auto Loader / notebook code
+│   └── retail_dlt.py       ← DLT/LDP declarations
+├── resources/
+│   ├── job_daily.yml       ← optional split files
+│   └── pipeline.yml
+└── fixtures/               ← sample data for dev
+```
+
+#### End-to-end flow diagram
+
+```
+  Developer laptop / CI
+           │
+           │  1. edit code + YAML
+           │  2. git commit
+           ▼
+      ┌─────────────┐
+      │  Git repo   │
+      └──────┬──────┘
+             │  3. databricks bundle validate
+             │  4. databricks bundle deploy -t prod
+             ▼
+      ┌──────────────────────────────────────┐
+      │     CONTROL PLANE (target workspace) │
+      │  Creates/updates:                    │
+      │   • Job definitions                  │
+      │   • Pipeline definitions             │
+      │   • Uploads notebooks/artifacts      │
+      └──────────────┬───────────────────────┘
+                     │  5. schedule or bundle run
+                     ▼
+      ┌──────────────────────────────────────┐
+      │     DATA PLANE                         │
+      │  Clusters run Spark / DLT tasks        │
+      │  Read/write Delta in your storage      │
+      └──────────────────────────────────────┘
+```
+
+#### Annotated `databricks.yml` (what each part is for)
 
 ```yaml
-# databricks.yml (illustrative)
+# databricks.yml (illustrative — learn the shape, not memorize every key)
 bundle:
-  name: retail_lakehouse
+  name: retail_lakehouse          # project name in Databricks
+
+variables:
+  catalog:
+    default: main_dev             # default UC catalog for this bundle
+  job_schedule:
+    default: "0 6 * * *"          # cron: 06:00 daily
 
 targets:
   dev:
+    default: true
     workspace:
-      host: https://<dev-workspace>
+      host: https://dbc-XXXX.cloud.databricks.com
+    variables:
+      catalog: main_dev           # override: use dev catalog
   prod:
     workspace:
-      host: https://<prod-workspace>
+      host: https://dbc-YYYY.cloud.databricks.com
+    variables:
+      catalog: main_prod          # override: use prod catalog
+      job_schedule: "0 5 * * *"   # prod runs earlier
 
 resources:
-  jobs:
-    daily_silver_gold:
-      name: daily_silver_gold
-      tasks:
-        - task_key: dlt_pipeline
-          pipeline_task:
-            pipeline_id: ${resources.pipelines.retail_pipeline.id}
   pipelines:
     retail_pipeline:
       name: retail_pipeline
+      catalog: ${var.catalog}     # from variables / target
+      target: silver              # schema/target for pipeline tables
       libraries:
         - notebook:
             path: ./src/retail_dlt.py
+      channel: CURRENT
+
+  jobs:
+    daily_silver_gold:
+      name: daily_silver_gold
+      schedule:
+        quartz_cron_expression: ${var.job_schedule}
+        timezone_id: Europe/Berlin
+      tasks:
+        - task_key: run_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.retail_pipeline.id}
+        - task_key: refresh_gold_sql
+          depends_on:
+            - task_key: run_pipeline
+          notebook_task:
+            notebook_path: ./src/gold_refresh.py
 ```
 
-**Use cases:** CI/CD, environment parity, reviewable infra.  
-**Advantages:** GitOps-friendly.  
-**Limitations:** Learning curve; must manage secrets/targets carefully.
+**Purpose of this YAML (step by step)**
+
+1. **`bundle.name`** — names the project so deploys are tracked.
+2. **`variables`** — shared knobs (catalog, schedule) so you don’t hardcode prod values in code.
+3. **`targets.dev` / `targets.prod`** — different workspace URLs + variable overrides (dev catalog vs prod catalog).
+4. **`resources.pipelines`** — declare a DLT/LDP pipeline pointing at your notebook; deploy creates/updates that pipeline object.
+5. **`resources.jobs`** — declare a scheduled job with two tasks: run the pipeline, then run a Gold notebook **only after** the pipeline succeeds (`depends_on`).
+6. **`${resources.pipelines...id}`** — wire the job to the pipeline **created by the same bundle** (no copy-paste of IDs).
+
+#### Common CLI commands (what they do)
+
+| Command | Purpose |
+|---------|---------|
+| `databricks bundle init` | Scaffold a new bundle from a template |
+| `databricks bundle validate` | Check YAML/resources before deploy |
+| `databricks bundle deploy -t dev` | Create/update resources in **dev** workspace |
+| `databricks bundle deploy -t prod` | Same for **prod** |
+| `databricks bundle run daily_silver_gold -t prod` | Trigger the job now |
+| `databricks bundle destroy -t dev` | Tear down resources (careful in prod) |
+
+#### Use cases
+
+- Promote the **same** Bronze→Silver→Gold pipeline from lab to production  
+- CI/CD: on merge to `main`, deploy to staging; on tag, deploy to prod  
+- Keep schedules, cluster sizes, and catalog names **reviewed in Git**  
+- Onboard new engineers: clone repo → `bundle deploy -t dev` → working stack  
+
+#### Advantages
+
+- Less environment drift (Jobs UI click-ops)  
+- Reviewable changes (PRs on YAML + code)  
+- One definition → many targets  
+- Fits Germany enterprise expectation: IaC / auditability  
+
+#### Limitations
+
+- Learning curve (YAML schema, sync state)  
+- Secrets must use secret scopes / CI secrets — never commit tokens  
+- Some workspace-only experiments are still faster in the UI first, then “bundle-ize”  
+- Destroy/deploy mistakes in prod hurt — use careful targets and approvals  
+
+#### Bundle vs Jobs UI vs “just notebooks”
+
+| Approach | Good for | Weak at |
+|----------|----------|---------|
+| Notebooks only | Learning, spikes | Repeatable prod deploys |
+| Jobs UI clicks | Quick one-off schedule | Multi-env parity, review |
+| **Asset Bundles** | Team production + CI/CD | Tiny personal sandboxes |
+
+#### Mini scenario (what will happen)
+
+1. You change an expectation in `retail_dlt.py` and bump the Gold notebook.  
+2. `bundle validate` → YAML OK.  
+3. `bundle deploy -t prod` → control plane updates pipeline + job definitions; uploads new notebook revisions.  
+4. Next schedule (05:00 Berlin) → job starts → pipeline task runs Spark in **data plane** → Gold task runs → BI sees new metrics.  
+5. If pipeline expectations `fail`, Gold task does not run (`depends_on`).  
 
 ---
 
@@ -687,6 +941,16 @@ df = spark.table("main.silver.orders")
 df.filter("amount > 0").createOrReplaceTempView("o")
 spark.sql("SELECT date, SUM(amount) FROM o GROUP BY date").show()
 ```
+
+**Purpose (step by step)**
+
+1. `spark.table(...)` — load Unity Catalog table `main.silver.orders` as a DataFrame (no SQL string yet).  
+2. `filter("amount > 0")` — keep only positive amounts.  
+3. `createOrReplaceTempView("o")` — register that filtered DataFrame as a temporary SQL name `o` for this session.  
+4. `spark.sql("SELECT date, SUM(amount) ...")` — aggregate in SQL against `o`.  
+5. `.show()` — print results to the notebook (driver collects a sample/display).  
+
+**Takeaway:** DataFrame API and SQL are two doors into the **same** Spark engine.
 
 ---
 
@@ -916,6 +1180,119 @@ A: Same optimizer. Choose readability; many teams mix both.
 
 ---
 
+## Appendix C — Query cookbook (purpose step by step)
+
+Use this when the exam shows a snippet and asks “what does this do?”
+
+### C1. COPY INTO
+
+```sql
+COPY INTO main.bronze.orders
+FROM 'abfss://landing@storage/orders/'
+FILEFORMAT = JSON
+COPY_OPTIONS ('mergeSchema' = 'true');
+```
+
+| Step | What it does |
+|------|----------------|
+| 1 | Target table: `main.bronze.orders` (Delta) |
+| 2 | Source path: cloud landing folder of JSON files |
+| 3 | Read as JSON |
+| 4 | `mergeSchema` allows new columns to be added if files evolved |
+| 5 | Tracks which files were already loaded → **re-run is idempotent** for those files |
+
+### C2. Clones
+
+```sql
+CREATE TABLE main.dev.orders_shallow SHALLOW CLONE main.prod.orders;
+CREATE TABLE main.backup.orders_deep DEEP CLONE main.prod.orders;
+```
+
+| Query | Purpose |
+|-------|---------|
+| SHALLOW CLONE | Fast: copy metadata only; still reads prod’s data files |
+| DEEP CLONE | Slow/safer: copy metadata **and** data files into new location |
+
+### C3. History, time travel, optimize, vacuum
+
+```sql
+DESCRIBE HISTORY main.silver.orders;
+SELECT * FROM main.silver.orders VERSION AS OF 12;
+SELECT * FROM main.silver.orders TIMESTAMP AS OF '2026-07-01T00:00:00';
+OPTIMIZE main.silver.orders ZORDER BY (customer_id, order_date);
+VACUUM main.silver.orders RETAIN 168 HOURS;
+```
+
+| Statement | Purpose |
+|-----------|---------|
+| `DESCRIBE HISTORY` | List commits/versions (who/what/when) — **does not delete** |
+| `VERSION AS OF` | Read table at a past version |
+| `TIMESTAMP AS OF` | Read table as of a past time |
+| `OPTIMIZE ... ZORDER BY` | Compact/rewrite files so filters on those columns scan less |
+| `VACUUM ... RETAIN 168 HOURS` | Delete unreferenced files older than 7 days — **limits** time travel |
+
+### C4. Set Liquid Clustering (conceptual)
+
+```sql
+CREATE TABLE main.silver.orders (
+  order_id BIGINT,
+  customer_id BIGINT,
+  order_date DATE,
+  amount DOUBLE
+) USING DELTA
+CLUSTER BY (customer_id, order_date);
+```
+
+**Purpose:** Create Delta table and declare cluster keys so Databricks can liquid-cluster data for those filters — avoid partition explosion on high-cardinality keys.
+
+### C5. Joins / set ops (cheat meanings)
+
+```sql
+-- Inner: only matching ids
+SELECT * FROM orders o INNER JOIN customers c ON o.customer_id = c.id;
+
+-- Left: all orders; customer cols null if no match
+SELECT * FROM orders o LEFT JOIN customers c ON o.customer_id = c.id;
+
+-- Anti: orders with no customer match (orphans)
+SELECT * FROM orders o LEFT ANTI JOIN customers c ON o.customer_id = c.id;
+
+-- Semi: orders that have a customer (existence), no customer columns
+SELECT * FROM orders o LEFT SEMI JOIN customers c ON o.customer_id = c.id;
+
+-- Union all rows (duplicates kept)
+SELECT * FROM a UNION ALL SELECT * FROM b;
+
+-- Intersect: rows in both
+SELECT * FROM a INTERSECT SELECT * FROM b;
+```
+
+### C6. Auto Loader (PySpark) — what each piece is for
+
+```python
+(df := spark.readStream
+  .format("cloudFiles")
+  .option("cloudFiles.format", "json")
+  .option("cloudFiles.schemaLocation", "/Volumes/main/ops/schemas/orders")
+  .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
+  .load("abfss://landing@storage/orders/")
+).writeStream \
+  .option("checkpointLocation", "/Volumes/main/ops/checkpoints/orders") \
+  .trigger(availableNow=True) \
+  .table("main.bronze.orders")
+```
+
+| Piece | Purpose |
+|-------|---------|
+| `readStream` + `cloudFiles` | Auto Loader incremental file source |
+| `schemaLocation` | Where inferred schema is stored/evolved |
+| `schemaEvolutionMode` | How to handle new fields |
+| `checkpointLocation` | Exactly-once progress; **do not delete casually** |
+| `trigger(availableNow=True)` | Process all available files then stop (common job pattern) |
+| `.table(...)` | Sink into Delta Bronze table |
+
+---
+
 ## Appendix B — When you send course PDFs / notes later
 
 Reply with `/cert databricks` (or “update the DEA guide”) and attach materials. I will:
@@ -924,5 +1301,7 @@ Reply with `/cert databricks` (or “update the DEA guide”) and attach materia
 2. Mark **exam-specific** wording (DLT vs Lakeflow names)  
 3. Save as `cert_Databricks_DEA_Associate_YYYY-MM-DD_v2.md`  
 4. Push again to Personal-Growth  
+
+**Mock exam companion:** `cert_Databricks_DEA_Associate_Mock_Exam_2026-07-20.md`
 
 *End of study guide.*

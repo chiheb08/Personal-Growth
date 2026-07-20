@@ -8,7 +8,8 @@ Each guide starts from **definitions**, covers **basics → exam depth**, uses *
 
 | Guide | File |
 |-------|------|
-| Databricks Data Engineer Associate | [`cert_Databricks_DEA_Associate_2026-07-20.md`](cert_Databricks_DEA_Associate_2026-07-20.md) |
+| Databricks Data Engineer Associate — Study Guide | [`cert_Databricks_DEA_Associate_2026-07-20.md`](cert_Databricks_DEA_Associate_2026-07-20.md) |
+| Databricks Data Engineer Associate — Mock Exam (100 Q) | [`cert_Databricks_DEA_Associate_Mock_Exam_2026-07-20.md`](cert_Databricks_DEA_Associate_Mock_Exam_2026-07-20.md) |
 
 ## How to request a guide (in Cursor)
 

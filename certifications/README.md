@@ -6,7 +6,9 @@ Each guide starts from **definitions**, covers **basics → exam depth**, uses *
 
 ## Guides
 
-_Guides appear here as `cert_[Slug]_YYYY-MM-DD.md` after each `/cert` run._
+| Guide | File |
+|-------|------|
+| Databricks Data Engineer Associate | [`cert_Databricks_DEA_Associate_2026-07-20.md`](cert_Databricks_DEA_Associate_2026-07-20.md) |
 
 ## How to request a guide (in Cursor)
 
@@ -14,6 +16,7 @@ _Guides appear here as `cert_[Slug]_YYYY-MM-DD.md` after each `/cert` run._
 /cert AWS Solutions Architect Associate
 /cert CKA — focus on networking and RBAC
 /cert AZ-104 — using my attached PDF notes
+/cert Databricks Data Engineer Associate
 ```
 
 ## Related
